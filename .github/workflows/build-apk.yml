@@ -22,31 +22,32 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Gradle Build Tool
-        uses: gradle/actions/setup-gradle@v3
+      # 禁用 GitHub 缓存，彻底避免 GitHub 服务器 400 故障
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: true
 
-      - name: Grant Execute Permission for Gradlew
-        run: chmod +x gradlew || true
+      # 自动补全 gradle-wrapper.jar 二进制，防止缺少 jar 导致找不到 WrapperMain
+      - name: Ensure Gradle Wrapper Binary
+        run: |
+          mkdir -p gradle/wrapper
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "Downloading gradle-wrapper.jar..."
+            curl -sLo gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.6.0/gradle/wrapper/gradle-wrapper.jar || true
+          fi
+          chmod +x gradlew || true
 
+      # 执行编译打包
       - name: Build Debug & Release APK
         run: |
-          if [ -f "./gradlew" ]; then
-            ./gradlew assembleDebug assembleRelease --stacktrace
+          if [ -f "./gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            ./gradlew assembleRelease assembleDebug --no-daemon --stacktrace
           else
-            gradle assembleDebug assembleRelease --stacktrace
+            gradle assembleRelease assembleDebug --no-daemon --stacktrace
           fi
 
-      - name: Sign APK (Using Standard Android Debug Keystore)
-        run: |
-          mkdir -p ~/.android
-          keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" || true
-          BUILD_TOOLS=$(ls -d /usr/local/lib/android/sdk/build-tools/* | sort -V | tail -n 1)
-          echo "Using Android Build Tools: $BUILD_TOOLS"
-          if [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
-            $BUILD_TOOLS/zipalign -v -p 4 app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/app-release-aligned.apk
-            $BUILD_TOOLS/apksigner sign --ks ~/.android/debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --out app/build/outputs/apk/release/CopyManga-Xposed-v3.0.9-release.apk app/build/outputs/apk/release/app-release-aligned.apk
-          fi
-
+      # 上传生成的 APK 到 GitHub Artifacts 供下载
       - name: Upload Compiled APK to Artifacts
         uses: actions/upload-artifact@v4
         with:
