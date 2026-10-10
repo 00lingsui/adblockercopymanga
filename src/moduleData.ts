@@ -732,22 +732,414 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Grant Execute Permission for Gradlew
-        run: chmod +x gradlew
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Ensure Android Project Files (Auto-Bootstrap for Pure GitHub Web Mode)
+        run: |
+          # 若仓库中尚未上传源码（用户直接在 GitHub 网页新建此单一 workflow 文件），自动写入全部 Kotlin 模块源码
+          if [ ! -f "app/src/main/java/com/copymanga/xposed/MainHook.kt" ]; then
+            echo ">>> 检测到纯 GitHub 网页端模式：自动在云端初始化拷贝漫画 Xposed 模块源码..."
+            mkdir -p app/src/main/java/com/copymanga/xposed/hooks
+            mkdir -p app/src/main/java/com/copymanga/xposed/utils
+            mkdir -p app/src/main/assets
+            mkdir -p app/src/main/res/values
+
+            cat << 'EOF' > settings.gradle.kts
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = java.net.URI("https://api.xposed.info/") }
+    }
+}
+rootProject.name = "CopyMangaAdBlock"
+include(":app")
+EOF
+
+            cat << 'EOF' > build.gradle.kts
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.android) apply false
+}
+EOF
+
+            mkdir -p gradle
+            cat << 'EOF' > gradle/libs.versions.toml
+[versions]
+agp = "8.4.1"
+kotlin = "1.9.24"
+coreKtx = "1.13.1"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+EOF
+
+            cat << 'EOF' > app/build.gradle.kts
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+}
+android {
+    namespace = "com.copymanga.xposed"
+    compileSdk = 34
+    defaultConfig {
+        applicationId = "com.copymanga.xposed"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0.0"
+    }
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+dependencies {
+    compileOnly("de.robv.android.xposed:api:82")
+}
+EOF
+
+            cat << 'EOF' > app/src/main/AndroidManifest.xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.copymanga.xposed">
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="拷贝漫画去广告模块">
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="针对拷贝漫画 3.0.9 (360加固+Flutter) 的穿山甲与OPPO广告屏蔽模块" />
+        <meta-data android:name="xposedminversion" android:value="102" />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+    </application>
+</manifest>
+EOF
+
+            cat << 'EOF' > app/src/main/assets/xposed_init
+com.copymanga.xposed.MainHook
+EOF
+
+            cat << 'EOF' > app/src/main/res/values/arrays.xml
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="xposed_scope">
+        <item>com.copymanga.app</item>
+    </string-array>
+</resources>
+EOF
+
+            cat << 'EOF' > app/src/main/java/com/copymanga/xposed/MainHook.kt
+package com.copymanga.xposed
+
+import com.copymanga.xposed.hooks.AdBlockerHook
+import com.copymanga.xposed.hooks.JiaguUnpackerHook
+import com.copymanga.xposed.utils.CrashCatcher
+import com.copymanga.xposed.utils.XpLog
+import de.robv.android.xposed.IXposedHookLoadPackage
+import de.robv.android.xposed.callbacks.XC_LoadPackage
+
+class MainHook : IXposedHookLoadPackage {
+    companion object {
+        const val TARGET_PACKAGE = "com.copymanga.app"
+        const val STUB_APP_CLASS = "com.stub.StubApp"
+        const val TAG = "CopyMangaAdBlock"
+    }
+    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
+        if (lpparam.packageName != TARGET_PACKAGE) return
+        if (lpparam.processName != TARGET_PACKAGE && !lpparam.processName.startsWith("$TARGET_PACKAGE:")) return
+        XpLog.d(">>> 目标应用启动: \${lpparam.packageName} <<<")
+        CrashCatcher.installEarlyExceptionHandler(lpparam.processName)
+        val isStubAppPresent = runCatching {
+            lpparam.classLoader.loadClass(STUB_APP_CLASS) != null
+        }.getOrDefault(false)
+        if (isStubAppPresent) {
+            XpLog.i("🔍 [360加固检测] 命中代理类 [$STUB_APP_CLASS]，激活就绪防御等待...")
+        }
+        JiaguUnpackerHook.waitForRealClassLoader(lpparam, isStubAppPresent) { realClassLoader, appContext ->
+            XpLog.i("✓ 成功获取 360 解密后的真实 ClassLoader: $realClassLoader")
+            CrashCatcher.upgradeWithContext(appContext)
+            AdBlockerHook.injectAdHooks(realClassLoader, appContext)
+        }
+    }
+}
+EOF
+
+            cat << 'EOF' > app/src/main/java/com/copymanga/xposed/hooks/JiaguUnpackerHook.kt
+package com.copymanga.xposed.hooks
+
+import android.app.Application
+import android.content.Context
+import android.content.ContextWrapper
+import com.copymanga.xposed.utils.XpLog
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
+import de.robv.android.xposed.callbacks.XC_LoadPackage
+import java.util.concurrent.atomic.AtomicBoolean
+
+object JiaguUnpackerHook {
+    private val isDispatched = AtomicBoolean(false)
+    private const val STUB_APP_CLASS = "com.stub.StubApp"
+
+    fun waitForRealClassLoader(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        isStubAppDetected: Boolean,
+        onRealClassLoaderReady: (ClassLoader, Context) -> Unit
+    ) {
+        if (isStubAppDetected) {
+            runCatching {
+                val stubClass = XposedHelpers.findClassIfExists(STUB_APP_CLASS, lpparam.classLoader)
+                if (stubClass != null) {
+                    XposedBridge.hookAllMethods(stubClass, "attachBaseContext", object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            safelyHandleContextAttached(param, onRealClassLoaderReady)
+                        }
+                    })
+                    XposedBridge.hookAllMethods(stubClass, "onCreate", object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            safelyHandleContextAttached(param, onRealClassLoaderReady)
+                        }
+                    })
+                }
+            }
+        }
+        runCatching {
+            XposedHelpers.findAndHookMethod(Application::class.java, "attach", Context::class.java, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    safelyHandleContextAttached(param, onRealClassLoaderReady)
+                }
+            })
+        }
+        runCatching {
+            XposedHelpers.findAndHookMethod(ContextWrapper::class.java, "attachBaseContext", Context::class.java, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (param.thisObject is Application) safelyHandleContextAttached(param, onRealClassLoaderReady)
+                }
+            })
+        }
+        runCatching {
+            XposedHelpers.findAndHookMethod(Application::class.java, "onCreate", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    safelyHandleContextAttached(param, onRealClassLoaderReady)
+                }
+            })
+        }
+    }
+
+    private fun safelyHandleContextAttached(
+        param: XC_MethodHook.MethodHookParam,
+        callback: (ClassLoader, Context) -> Unit
+    ) {
+        val app = param.thisObject as? Application ?: return
+        val context = (param.args.getOrNull(0) as? Context) ?: app.baseContext ?: app.applicationContext ?: return
+        val realClassLoader = context.classLoader ?: app.classLoader ?: return
+        if (isDispatched.compareAndSet(false, true)) {
+            XpLog.i(">>> 360 加固解密完成: \${realClassLoader.javaClass.name} <<<")
+            try { callback(realClassLoader, context) } catch (t: Throwable) { XpLog.e("挂钩异常", t) }
+        }
+    }
+}
+EOF
+
+            cat << 'EOF' > app/src/main/java/com/copymanga/xposed/hooks/AdBlockerHook.kt
+package com.copymanga.xposed.hooks
+
+import android.content.Context
+import com.copymanga.xposed.utils.XpLog
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XC_MethodReplacement
+import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
+import java.lang.reflect.Modifier
+
+object AdBlockerHook {
+    fun injectAdHooks(classLoader: ClassLoader, context: Context) {
+        hookPangle(classLoader)
+        hookOppo(classLoader)
+        hookThirdParty(classLoader)
+        hookFlutterChannel(classLoader)
+    }
+
+    private fun hookPangle(classLoader: ClassLoader) {
+        runCatching {
+            val ttAdSdkClass = XposedHelpers.findClassIfExists("com.bytedance.sdk.openadsdk.TTAdSdk", classLoader) ?: return@runCatching
+            for (m in ttAdSdkClass.declaredMethods) {
+                if (m.name == "init" || m.name == "start") {
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            for (arg in param.args) {
+                                if (arg != null && arg.javaClass.name.contains("Callback", ignoreCase = true)) {
+                                    runCatching { XposedHelpers.callMethod(arg, "success") }
+                                }
+                            }
+                            param.result = null
+                        }
+                    })
+                }
+            }
+            runCatching {
+                XposedHelpers.findAndHookMethod(ttAdSdkClass, "isInitSuccess", XC_MethodReplacement.returnConstant(true))
+            }
+        }
+    }
+
+    private fun hookOppo(classLoader: ClassLoader) {
+        val list = listOf("com.heytap.msp.mobad.api.MobAdManager", "com.oppo.mobad.api.InitManager")
+        for (name in list) {
+            runCatching {
+                val clazz = XposedHelpers.findClassIfExists(name, classLoader) ?: return@runCatching
+                for (m in clazz.declaredMethods) {
+                    if (Modifier.isPublic(m.modifiers) && (m.name.startsWith("init") || m.name.startsWith("load") || m.name.startsWith("show"))) {
+                        XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hookThirdParty(classLoader: ClassLoader) {
+        val list = listOf("com.yifan.sdk.YFAdSdk", "com.kwad.sdk.KsAdSDK", "com.qq.e.comm.managers.GDTAdSdk")
+        for (name in list) {
+            runCatching {
+                val clazz = XposedHelpers.findClassIfExists(name, classLoader) ?: return@runCatching
+                for (m in clazz.declaredMethods) {
+                    if (m.name == "init" || m.name == "start") XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                }
+            }
+        }
+    }
+
+    private fun hookFlutterChannel(classLoader: ClassLoader) {
+        runCatching {
+            val mcClass = XposedHelpers.findClassIfExists("io.flutter.plugin.common.MethodChannel", classLoader) ?: return@runCatching
+            for (m in mcClass.declaredMethods) {
+                if (m.name == "invokeMethod" && m.parameterTypes.isNotEmpty()) {
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val name = param.args.getOrNull(0) as? String ?: return
+                            val lower = name.lowercase()
+                            if (lower.contains("comic") || lower.contains("manga") || lower.contains("reader") || lower.contains("chapter")) return
+                            if (lower.contains("ad") || lower.contains("splash") || lower.contains("reward") || lower.contains("banner") || lower.contains("pangle")) {
+                                val lastArg = param.args.lastOrNull()
+                                if (lastArg != null && lastArg.javaClass.name.contains("Result")) {
+                                    runCatching { XposedHelpers.callMethod(lastArg, "success", null) }
+                                }
+                                param.result = null
+                            }
+                        }
+                    })
+                }
+            }
+        }
+    }
+}
+EOF
+
+            cat << 'EOF' > app/src/main/java/com/copymanga/xposed/utils/CrashCatcher.kt
+package com.copymanga.xposed.utils
+
+import android.content.Context
+import android.os.Build
+import android.os.Process
+import java.io.File
+import java.io.FileWriter
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+
+object CrashCatcher {
+    private val isInstalled = AtomicBoolean(false)
+    private var defaultHandler: Thread.UncaughtExceptionHandler? = null
+    private var appContext: Context? = null
+    private var targetProcessName: String = ""
+
+    fun installEarlyExceptionHandler(processName: String) {
+        if (isInstalled.compareAndSet(false, true)) {
+            targetProcessName = processName
+            defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                handleCrash(thread, throwable)
+                defaultHandler?.uncaughtException(thread, throwable)
+            }
+        }
+    }
+
+    fun upgradeWithContext(context: Context) { appContext = context }
+
+    private fun handleCrash(thread: Thread, throwable: Throwable) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss-SSS", Locale.getDefault()).format(Date())
+        val sw = StringWriter()
+        throwable.printStackTrace(PrintWriter(sw))
+        val log = "Time: $timestamp\\nThread: \${thread.name}\\nDevice: \${Build.MODEL}\\nAndroid: \${Build.VERSION.RELEASE}\\nStack:\\n$sw"
+        XpLog.e(log)
+        appContext?.getExternalFilesDir("xposed_logs")?.let { dir ->
+            runCatching {
+                if (!dir.exists()) dir.mkdirs()
+                FileWriter(File(dir, "crash_$timestamp.log")).use { it.write(log) }
+            }
+        }
+    }
+}
+EOF
+
+            cat << 'EOF' > app/src/main/java/com/copymanga/xposed/utils/XpLog.kt
+package com.copymanga.xposed.utils
+
+import android.util.Log
+import com.copymanga.xposed.MainHook
+import de.robv.android.xposed.XposedBridge
+
+object XpLog {
+    private const val TAG = MainHook.TAG
+    fun d(msg: String) { Log.d(TAG, msg); XposedBridge.log("[$TAG][DEBUG] $msg") }
+    fun i(msg: String) { Log.i(TAG, msg); XposedBridge.log("[$TAG][INFO] $msg") }
+    fun w(msg: String) { Log.w(TAG, msg); XposedBridge.log("[$TAG][WARN] $msg") }
+    fun e(msg: String, t: Throwable? = null) { Log.e(TAG, msg, t); XposedBridge.log("[$TAG][ERROR] $msg"); t?.let { XposedBridge.log(it) } }
+}
+EOF
+          fi
 
       - name: Build Debug & Release APK
-        run: ./gradlew assembleDebug assembleRelease --stacktrace
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug assembleRelease --stacktrace
+          else
+            gradle assembleDebug assembleRelease --stacktrace
+          fi
 
       - name: Sign APK (Using Standard Android Debug Keystore)
         run: |
-          # 自动使用系统内置 debug.keystore 为 release APK 签名，便于 LSPosed 直接安装
           mkdir -p ~/.android
           keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" || true
-          
-          # 找到构建出的 APK
           BUILD_TOOLS=\$(ls -d /usr/local/lib/android/sdk/build-tools/* | sort -V | tail -n 1)
           echo "Using Android Build Tools: \$BUILD_TOOLS"
-          
           if [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
             \$BUILD_TOOLS/zipalign -v -p 4 app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/app-release-aligned.apk
             \$BUILD_TOOLS/apksigner sign --ks ~/.android/debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --out app/build/outputs/apk/release/CopyManga-Xposed-v3.0.9-release.apk app/build/outputs/apk/release/app-release-aligned.apk
