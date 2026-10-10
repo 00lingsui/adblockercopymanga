@@ -17,54 +17,46 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      # 禁用 GitHub 外部缓存，防止 GitHub 官方缓存服务器网络 400 报错
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-disabled: true
-
-      # 网页单一文件自包含初始化：若仓库无源码，自动在云端生成整套项目代码
-      - name: Ensure Android Project Files (Auto-Bootstrap)
+      # 空仓库自动保障：若根目录未上传工程，自动就地秒级解压全套加固脱壳与去广告模块源码
+      - name: Ensure Android Project Files
         run: |
           if [ ! -f "settings.gradle.kts" ]; then
-            echo ">>> 纯 GitHub 网页端模式：自动在云端解压拷贝漫画 Xposed 模块全套源码与配置..."
-            python3 -c "import zlib, base64, json, os; p = json.loads(zlib.decompress(base64.b64decode('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')).decode('utf-8'))
-for k,v in p.items():
-    d = os.path.dirname(k)
-    if d: os.makedirs(d, exist_ok=True)
-    with open(k, 'wb') as out: out.write(base64.b64decode(v))
-"
+            echo ">>> 检测到空仓库：正在自动部署拷贝漫画 Xposed 模块全套源码..."
+            base64 -d << 'EOF' | tar -xz
+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
+EOF
           fi
 
-      # 自动补全 gradle-wrapper.jar 二进制，防止缺少 jar 导致找不到 WrapperMain
-      - name: Ensure Gradle Wrapper Binary
+      # 保证具备稳定可靠的 Gradle 8.6 构建环境（不使用易受缓存网络影响的 setup-gradle）
+      - name: Set up Gradle 8.6
         run: |
-          mkdir -p gradle/wrapper
-          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "Downloading gradle-wrapper.jar..."
-            curl -sLo gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.6.0/gradle/wrapper/gradle-wrapper.jar || true
+          if ! command -v gradle &> /dev/null; then
+            echo ">>> 安装官方 Gradle 8.6 构建引擎..."
+            curl -sSL https://services.gradle.org/distributions/gradle-8.6-bin.zip -o /tmp/gradle.zip
+            sudo unzip -q -o /tmp/gradle.zip -d /opt
+            echo "/opt/gradle-8.6/bin" >> $GITHUB_PATH
           fi
-          chmod +x gradlew || true
 
-      # 执行编译打包（同时编译 Release 与 Debug 版本，支持直签）
-      - name: Build Debug & Release APK
+      # 执行编译打包（同时产出 Release 与 Debug APK）
+      - name: Build Release & Debug APK
         run: |
           if [ -f "./gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            ./gradlew assembleRelease assembleDebug --no-daemon --stacktrace
+            chmod +x ./gradlew
+            ./gradlew assembleRelease assembleDebug --stacktrace
           else
-            gradle assembleRelease assembleDebug --no-daemon --stacktrace
+            gradle assembleRelease assembleDebug --stacktrace
           fi
 
-      # 上传生成的 APK 到 GitHub Artifacts 供下载
+      # 上传编译生成的 APK 到 GitHub Artifacts，供直接点击下载
       - name: Upload Compiled APK to Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: CopyManga-Xposed-v3.0.9-APK
           path: |
             app/build/outputs/apk/**/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
