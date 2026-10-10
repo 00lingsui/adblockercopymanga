@@ -9,6 +9,7 @@ import { CodeViewer } from './components/CodeViewer';
 import { ArchitectureFlow } from './components/ArchitectureFlow';
 import { CrashLogSimulator } from './components/CrashLogSimulator';
 import { GuideSection } from './components/GuideSection';
+import { GitHubActionsSection } from './components/GitHubActionsSection';
 import { exportProjectZip } from './utils/zipExporter';
 import {
   Code,
@@ -24,12 +25,13 @@ import {
   Sliders,
   Sparkles,
   ExternalLink,
+  Github,
 } from 'lucide-react';
 
 export default function App() {
   const [config, setConfig] = useState<ModuleConfig>(defaultConfig);
   const [activeTab, setActiveTab] = useState<
-    'code' | 'flow' | 'crash' | 'config' | 'guide'
+    'code' | 'flow' | 'crash' | 'github' | 'config' | 'guide'
   >('code');
   const [activeFileId, setActiveFileId] = useState<string>('MainHook');
   const [isExporting, setIsExporting] = useState<boolean>(false);
@@ -85,7 +87,7 @@ export default function App() {
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                适配：<span className="text-slate-200 font-mono">com.copymanga.app</span> v{config.appVersion} ｜ 360加固穿透 ｜ Flutter 通道过滤 ｜ 闪退抓取
+                适配：<span className="text-slate-200 font-mono">com.copymanga.app</span> v{config.appVersion} ｜ 360加固 (<code className="text-amber-300">com.stub.StubApp</code>) ｜ GitHub Actions 自动构建
               </p>
             </div>
           </div>
@@ -125,7 +127,19 @@ export default function App() {
             }`}
           >
             <Layers className="w-4 h-4" />
-            <span>脱壳与拦截时序架构</span>
+            <span>StubApp 与脱壳时序架构</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('github')}
+            className={`flex items-center gap-2 py-2.5 px-4 text-xs font-semibold border-b-2 whitespace-nowrap transition ${
+              activeTab === 'github'
+                ? 'border-purple-500 text-purple-400 bg-purple-500/5'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Github className="w-4 h-4" />
+            <span>GitHub 自动构建 APK</span>
           </button>
 
           <button
@@ -187,7 +201,7 @@ export default function App() {
                 {/* Core & Entry */}
                 <div>
                   <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-2 py-1">
-                    核心入口与基础工具
+                    核心入口与加固代理防御
                   </div>
                   <div className="space-y-1">
                     {files
@@ -234,10 +248,10 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Configurations */}
+                {/* Configurations & Build */}
                 <div>
                   <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-2 py-1">
-                    清单与框架配置文件
+                    构建、CI 与清单配置
                   </div>
                   <div className="space-y-1">
                     {files
@@ -264,9 +278,9 @@ export default function App() {
               <div className="mt-5 p-3 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-400 leading-relaxed">
                 <div className="font-semibold text-white mb-1 flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                  已为当前环境优化
+                  已强化 com.stub.StubApp 检测
                 </div>
-                代码已完整集成 <code className="text-indigo-300">IXposedHookLoadPackage</code>、360 壳 ClassLoader 异步获取回调、穿山甲与 OPPO 虚假回调、Flutter MethodChannel 白名单安全过滤与本地日志落盘。
+                代码已在 <code className="text-amber-300">MainHook.kt</code> 中预检 360 加固壳代理入口，并在 <code className="text-emerald-300">JiaguUnpackerHook.kt</code> 中通过多重非空保障彻底杜绝 NullPointerException。
               </div>
             </div>
 
@@ -283,6 +297,8 @@ export default function App() {
 
         {activeTab === 'flow' && <ArchitectureFlow />}
 
+        {activeTab === 'github' && <GitHubActionsSection config={config} />}
+
         {activeTab === 'crash' && <CrashLogSimulator config={config} />}
 
         {activeTab === 'config' && (
@@ -293,7 +309,7 @@ export default function App() {
                 模块拦截参数与开关微调
               </h2>
               <p className="text-sm text-slate-400 mt-1">
-                修改配置后，代码查看器和导出的 Android Studio 项目将即时同步更新
+                修改配置后，代码查看器和导出的 Android Studio 项目及 GitHub 工作流将即时同步更新
               </p>
             </div>
 
@@ -419,7 +435,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-slate-800/80 py-4 text-center text-xs text-slate-500 bg-slate-950">
-        拷贝漫画 3.0.9 去广告 Xposed 核心模块开发工作台 · 适配 API 102 (LSPosed) · 360 加固动态穿透架构
+        拷贝漫画 3.0.9 去广告 Xposed 核心模块开发工作台 · 适配 API 102 (LSPosed) · 360 加固动态穿透架构 · GitHub Actions CI 驱动
       </footer>
     </div>
   );

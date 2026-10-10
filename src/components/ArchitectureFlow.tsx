@@ -42,13 +42,13 @@ export const ArchitectureFlow: React.FC = () => {
             <span className="text-xs font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold">STAGE 02</span>
             <Shield className="w-4 h-4 text-amber-400" />
           </div>
-          <h3 className="text-sm font-bold text-white mb-1">360 加固动态穿透</h3>
+          <h3 className="text-sm font-bold text-white mb-1">360 加固动态穿透 (com.stub.StubApp)</h3>
           <p className="text-xs text-slate-400 leading-relaxed">
-            应用初始仅暴露 <code className="text-amber-300 bg-slate-950 px-1 py-0.5 rounded">libjiagu.so</code> 与壳代理。Hook <code className="text-amber-300 bg-slate-950 px-1 py-0.5 rounded">Application.attach</code> 待真实 DEX 内存解密完成后，立即抓取解密后的真实 <strong className="text-emerald-400">ClassLoader</strong>。
+            检测 360 壳代理入口 <code className="text-amber-300 bg-slate-950 px-1 py-0.5 rounded">com.stub.StubApp</code>。Hook <code className="text-amber-300 bg-slate-950 px-1 py-0.5 rounded">StubApp.attachBaseContext</code> 及底层的 <code className="text-slate-300">Application.attach</code>，严格检查 Context 与 ClassLoader 非空，避免过早挂钩导致的 NullPointerException。
           </p>
           <div className="mt-3 pt-2 border-t border-slate-700/50 text-[11px] text-amber-300/90 flex items-center gap-1.5">
             <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span>AtomicBoolean 确保只挂载一次</span>
+            <span>StubApp + 空指针防御 + AtomicBoolean 单次挂载</span>
           </div>
         </div>
 

@@ -55,13 +55,19 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 /**
  * 拷贝漫画 Xposed 模块入口 (适配 API 102 / LSPosed)
- * Target App: 拷贝漫画 (com.copymanga.app) v${config.appVersion}
- * 特性：360 加固穿透、多广告 SDK 静默拦截、Flutter 平台通道广告过滤、崩溃守护日志抓取
+ * Target App: 拷贝漫画 (com.copymanga.app) v\${config.appVersion}
+ * 特性：
+ * 1. 360 加固 (com.stub.StubApp / libjiagu.so) 入口代理检测与防早 Hook 守护
+ * 2. 穿透加固动态捕获真实解密 ClassLoader，彻底规避 NullPointerException 与 ClassNotFoundException
+ * 3. 精准中和 Pangle 穿山甲、OPPO 商业化广告、亿帆 SDK 与 Flutter 平台 MethodChannel 广告
+ * 4. 严格放行漫画阅读通道与分页 CDN 图片，保障漫画阅读丝滑体验
+ * 5. 全局未捕获崩溃抓取与本地落盘诊断
  */
 class MainHook : IXposedHookLoadPackage {
 
     companion object {
-        const val TARGET_PACKAGE = "${config.packageName}"
+        const val TARGET_PACKAGE = "\${config.packageName}"
+        const val STUB_APP_CLASS = "com.stub.StubApp"
         const val TAG = "CopyMangaAdBlock"
     }
 
@@ -72,17 +78,28 @@ class MainHook : IXposedHookLoadPackage {
 
         XpLog.d(">>> 目标应用启动: \${lpparam.packageName} (进程: \${lpparam.processName}) <<<")
 
-        // 步骤 1: 在最早期安装通用未捕获异常崩溃守护器（捕获冷启动及加固解密初期的闪退）
-        ${config.enableCrashCatcher ? 'CrashCatcher.installEarlyExceptionHandler(lpparam.processName)' : '// CrashCatcher 已按需禁用'}
+        // 步骤 1: 在最早期安装全局未捕获异常崩溃守护器（捕获冷启动及加固解密初期的闪退）
+        \${config.enableCrashCatcher ? 'CrashCatcher.installEarlyExceptionHandler(lpparam.processName)' : '// CrashCatcher 已按需禁用'}
 
-        // 步骤 2: 绕过 360 加固 (libjiagu.so 壳环境)，监听 Application.attachBaseContext 捕获解密后的真 ClassLoader
-        JiaguUnpackerHook.waitForRealClassLoader(lpparam) { realClassLoader, appContext ->
+        // 步骤 2: 检测 360 加固壳代理入口类 com.stub.StubApp
+        val isStubAppPresent = runCatching {
+            lpparam.classLoader.loadClass(STUB_APP_CLASS) != null
+        }.getOrDefault(false)
+
+        if (isStubAppPresent) {
+            XpLog.i("🔍 [360加固检测] 明确识别到加固壳代理入口类 [$STUB_APP_CLASS]，激活壳完成状态防御机制！")
+        } else {
+            XpLog.d("未在首轮 ClassLoader 发现 $STUB_APP_CLASS (可能为未加固测试包或非标准代理入口)")
+        }
+
+        // 步骤 3: 调度加固穿透器：通过代理类与 Application.attachBaseContext 双重等待，待 DEX 解密后再调度广告拦截
+        JiaguUnpackerHook.waitForRealClassLoader(lpparam, isStubAppPresent) { realClassLoader, appContext ->
             XpLog.i("✓ 成功获取 360 加固解密后的真实 ClassLoader: $realClassLoader")
 
-            // 步骤 3: 升级崩溃捕获器为 App Context 完整版（获取外部存储路径权限与版本信息）
-            ${config.enableCrashCatcher ? 'CrashCatcher.upgradeWithContext(appContext)' : ''}
+            // 步骤 4: 升级崩溃捕获器为 App Context 完整版（获取外部存储路径权限与版本信息）
+            \${config.enableCrashCatcher ? 'CrashCatcher.upgradeWithContext(appContext)' : ''}
 
-            // 步骤 4: 执行核心广告拦截 Hook (Pangle穿山甲 / OPPO / 亿帆 / Flutter 通道)
+            // 步骤 5: 执行核心广告拦截 Hook (Pangle穿山甲 / OPPO / 亿帆 / Flutter 通道)
             AdBlockerHook.injectAdHooks(realClassLoader, appContext)
         }
     }
@@ -102,73 +119,130 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 360 加固脱壳/动态 ClassLoader 劫持器
- * 核心原理：
- * 360 加固在 Application.attachBaseContext(Context) 中解密 DEX 并重构 LoadedApk 中的 mClassLoader。
- * 在此之前所有业务 Class 均不可用（抛出 ClassNotFoundException）。
- * 必须在 attachBaseContext 执行完毕后获取解密完成后的真实 ClassLoader。
+ * 360 加固 (com.stub.StubApp / libjiagu.so) 脱壳与动态 ClassLoader 劫持器
+ * 核心防御机制：
+ * 1. 360 加固在 Application.attachBaseContext(Context) 中解密 DEX 并重构 LoadedApk 中的 mClassLoader。
+ * 2. 如果过早执行业务 Hook，由于真实 ClassLoader 尚未挂载，会导致反射空指针 (NPE) 或 ClassNotFoundException。
+ * 3. 本实现监听 com.stub.StubApp 及其父类 Application.attachBaseContext 与 onCreate，
+ *    通过多阶段校验确保 Context 与 ClassLoader 均已就绪且非空，仅在安全时机调度业务拦截。
  */
 object JiaguUnpackerHook {
 
     private val isDispatched = AtomicBoolean(false)
+    private const val STUB_APP_CLASS = "com.stub.StubApp"
 
     fun waitForRealClassLoader(
         lpparam: XC_LoadPackage.LoadPackageParam,
+        isStubAppDetected: Boolean,
         onRealClassLoaderReady: (ClassLoader, Context) -> Unit
     ) {
+        // 策略 1: 若检测到 com.stub.StubApp，直接精确挂钩壳入口的 attachBaseContext 与 onCreate
+        if (isStubAppDetected) {
+            runCatching {
+                val stubClass = XposedHelpers.findClassIfExists(STUB_APP_CLASS, lpparam.classLoader)
+                if (stubClass != null) {
+                    XposedBridge.hookAllMethods(stubClass, "attachBaseContext", object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            XpLog.d("捕获到 StubApp.attachBaseContext 执行完成，执行安全检验...")
+                            safelyHandleContextAttached(param, onRealClassLoaderReady)
+                        }
+                    })
+
+                    XposedBridge.hookAllMethods(stubClass, "onCreate", object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            XpLog.d("捕获到 StubApp.onCreate 执行完成 (作为就绪保证)...")
+                            safelyHandleContextAttached(param, onRealClassLoaderReady)
+                        }
+                    })
+                    XpLog.i("✓ 已精确锁定 360 加固入口代理 com.stub.StubApp 生命周期方法")
+                }
+            }.onFailure { e ->
+                XpLog.w("挂钩 StubApp 代理入口异常: \${e.message}")
+            }
+        }
+
+        // 策略 2: 通用系统底层 Application.attach(Context)
         runCatching {
-            // Hook 方案 A: Hook android.app.Application 的 attach(Context)
-            // 这是 Android 系统初始化 Application 的核心底层方法
             XposedHelpers.findAndHookMethod(
                 Application::class.java,
                 "attach",
                 Context::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        handleContextAttached(param, onRealClassLoaderReady)
+                        safelyHandleContextAttached(param, onRealClassLoaderReady)
                     }
                 }
             )
-            XpLog.d("已挂载 Application.attach 监控点")
+            XpLog.d("已挂载底层 Application.attach 监控点")
         }.onFailure { e ->
-            XpLog.w("挂载 Application.attach 失败，尝试 ContextWrapper.attachBaseContext: \${e.message}")
-            // Hook 方案 B: 兜底 Hook ContextWrapper.attachBaseContext
-            runCatching {
-                XposedHelpers.findAndHookMethod(
-                    ContextWrapper::class.java,
-                    "attachBaseContext",
-                    Context::class.java,
-                    object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            if (param.thisObject is Application) {
-                                handleContextAttached(param, onRealClassLoaderReady)
-                            }
+            XpLog.w("挂载 Application.attach 失败: \${e.message}")
+        }
+
+        // 策略 3: ContextWrapper.attachBaseContext 兜底方案
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                ContextWrapper::class.java,
+                "attachBaseContext",
+                Context::class.java,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (param.thisObject is Application) {
+                            safelyHandleContextAttached(param, onRealClassLoaderReady)
                         }
                     }
-                )
-            }.onFailure { e2 ->
-                XpLog.e("挂载 attachBaseContext 兜底方案亦失败: \${e2.message}", e2)
-            }
+                }
+            )
+        }.onFailure { e ->
+            XpLog.w("挂载 ContextWrapper.attachBaseContext 兜底点异常: \${e.message}")
+        }
+
+        // 策略 4: Application.onCreate 终极保障
+        // 若部分 360 加固版本在 attachBaseContext 结束瞬间尚未完成 LoadedApk 替换，onCreate 必然已全部加载完成
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                Application::class.java,
+                "onCreate",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        safelyHandleContextAttached(param, onRealClassLoaderReady)
+                    }
+                }
+            )
         }
     }
 
-    private fun handleContextAttached(
+    /**
+     * 空安全处理上下文与 ClassLoader，彻底规避 NullPointerException
+     */
+    private fun safelyHandleContextAttached(
         param: XC_MethodHook.MethodHookParam,
         callback: (ClassLoader, Context) -> Unit
     ) {
-        val app = param.thisObject as? Application ?: return
-        val context = param.args[0] as? Context ?: app.baseContext ?: return
+        val app = param.thisObject as? Application
+        if (app == null) {
+            XpLog.d("thisObject 尚未初始化为 Application，跳过本轮等待")
+            return
+        }
 
-        // 保证仅触发一次业务 Hook，防止多进程或重入导致的重复 Hook
+        val context = (param.args.getOrNull(0) as? Context) ?: app.baseContext ?: app.applicationContext
+        if (context == null) {
+            XpLog.w("上下文 Context 仍为 null，继续等待壳解密后续阶段...")
+            return
+        }
+
+        val realClassLoader = context.classLoader ?: app.classLoader
+        if (realClassLoader == null) {
+            XpLog.w("ClassLoader 仍为 null，继续等待")
+            return
+        }
+
+        // 仅触发一次真实业务挂钩
         if (isDispatched.compareAndSet(false, true)) {
-            val realClassLoader = context.classLoader ?: app.classLoader
-            XpLog.i(">>> 360 加固 attach 完成，成功获取 ClassLoader: \${realClassLoader.javaClass.name} <<<")
-            
-            // 安全调度到业务拦截逻辑
+            XpLog.i(">>> 360 加固动态解密确认完成，当前 ClassLoader: \${realClassLoader.javaClass.name} <<<")
             try {
                 callback(realClassLoader, context)
             } catch (t: Throwable) {
-                XpLog.e("执行真 ClassLoader 挂钩业务回调发生异常: \${t.message}", t)
+                XpLog.e("调度广告拦截业务发生异常: \${t.message}", t)
             }
         }
     }
@@ -183,7 +257,6 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
-import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
 /**
@@ -199,10 +272,10 @@ object AdBlockerHook {
     fun injectAdHooks(classLoader: ClassLoader, context: Context) {
         XpLog.i("========== 开始部署广告拦截器 ==========")
 
-        ${config.enablePangleBlock ? 'hookPangleSdk(classLoader)' : '// Pangle 拦截已禁用'}
-        ${config.enableOppoBlock ? 'hookOppoAdSdk(classLoader)' : '// OPPO 拦截已禁用'}
-        ${config.enableYifanBlock ? 'hookThirdPartyAdSdks(classLoader)' : '// 亿帆等第三方广告拦截已禁用'}
-        ${config.enableFlutterChannelBlock ? 'hookFlutterAdChannels(classLoader)' : '// Flutter 平台通道拦截已禁用'}
+        \${config.enablePangleBlock ? 'hookPangleSdk(classLoader)' : '// Pangle 拦截已禁用'}
+        \${config.enableOppoBlock ? 'hookOppoAdSdk(classLoader)' : '// OPPO 拦截已禁用'}
+        \${config.enableYifanBlock ? 'hookThirdPartyAdSdks(classLoader)' : '// 亿帆等第三方广告拦截已禁用'}
+        \${config.enableFlutterChannelBlock ? 'hookFlutterAdChannels(classLoader)' : '// Flutter 平台通道拦截已禁用'}
 
         XpLog.i("========== 广告拦截器挂载完毕 ==========")
     }
@@ -331,13 +404,6 @@ object AdBlockerHook {
 
     /**
      * 4. Flutter 平台通道广告拦截 (极其关键：绝对不误伤漫画阅读与网络图片)
-     * 原理：
-     * 拷贝漫画界面使用 Flutter 开发，Dart 层通过 MethodChannel 调用原生广告 SDK。
-     * 若直接阻止原生 SDK，有时 Flutter 层会留下空白容器或由于等待 Ad 回调超时卡住。
-     * 通过 Hook Flutter 的 MethodChannel，直接截断广告相关方法（如 loadSplashAd, showRewardAd），
-     * 返回成功(null)，让 Flutter 的 Dart 逻辑秒过，直接进入漫画主页！
-     *
-     * 【安全守则】：绝不拦截漫画内容接口（如 Dio、Http、图片缓存、manga_chapter 频道）
      */
     private fun hookFlutterAdChannels(classLoader: ClassLoader) {
         runCatching {
@@ -358,7 +424,6 @@ object AdBlockerHook {
                             // 精确特征匹配：只拦截广告相关动作，绝不触碰 reader/comic/image/chapter 等正文业务
                             if (isAdMethod(methodName)) {
                                 XpLog.d("拦截 Flutter 通道广告请求: $methodName")
-                                // 如果有 Result 回调，返回成功或空结果以防 Flutter 卡等待
                                 val lastArg = param.args.lastOrNull()
                                 if (lastArg != null && lastArg.javaClass.name.contains("Result")) {
                                     runCatching {
@@ -376,14 +441,8 @@ object AdBlockerHook {
         }
     }
 
-    /**
-     * 广告方法黑名单特征匹配
-     * 包含 splash(开屏), reward(激励视频), interstitial(插屏), banner(横幅), pangle, oppoad 等
-     * 明确排除 comic, manga, reader, chapter, image, download
-     */
     private fun isAdMethod(name: String): Boolean {
         val lower = name.lowercase()
-        // 白名单保护：如果是漫画阅读业务，绝对放行
         if (lower.contains("comic") || lower.contains("manga") || lower.contains("reader") ||
             lower.contains("chapter") || lower.contains("picture") || lower.contains("download")) {
             return false
@@ -418,12 +477,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 闪退与异常精准抓取工具
- * 功能：
- * 1. 自动接管 UncaughtExceptionHandler，无论冷启动崩溃还是业务抛错均不遗漏
- * 2. 导出设备硬件信息、Android 系统版本、拷贝漫画版本及完整堆栈轨迹
- * 3. 安全保存至应用本地外部存储目录 (/sdcard/Android/data/com.copymanga.app/files/${config.crashLogDirName})
- *    以及应用内部存储兜底 (/data/data/com.copymanga.app/files/${config.crashLogDirName})
- * 4. 同步打入 XposedBridge.log 便于 LSPosed 网页管理器与 Logcat 查看
  */
 object CrashCatcher {
 
@@ -432,9 +485,6 @@ object CrashCatcher {
     private var appContext: Context? = null
     private var targetProcessName: String = ""
 
-    /**
-     * 第一阶段：在 App 加载最早期挂载未捕获异常处理
-     */
     fun installEarlyExceptionHandler(processName: String) {
         if (isInstalled.compareAndSet(false, true)) {
             targetProcessName = processName
@@ -442,16 +492,12 @@ object CrashCatcher {
 
             Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
                 handleCrash(thread, throwable)
-                // 记录完成后转交原异常处理器，避免系统异常状态挂起
                 defaultHandler?.uncaughtException(thread, throwable)
             }
             XpLog.i("✓ 早期全局未捕获异常捕获器已就绪 [进程: $processName]")
         }
     }
 
-    /**
-     * 第二阶段：注入 Context，获取应用私有存储目录权限
-     */
     fun upgradeWithContext(context: Context) {
         this.appContext = context
         XpLog.i("✓ CrashCatcher 已升级 Context 存储支持: \${context.packageName}")
@@ -488,10 +534,7 @@ object CrashCatcher {
             appendLine("===================================================")
         }
 
-        // 1. 同步打印到 Xposed / LSPosed 系统日志
         XpLog.e(logContent)
-
-        // 2. 持久化写入磁盘文件
         saveCrashLogToDisk(timestamp, logContent)
     }
 
@@ -499,19 +542,14 @@ object CrashCatcher {
         val fileName = "crash_$timestamp.log"
         val targetDirs = mutableListOf<File>()
 
-        // 候选目录 1: 应用专属外部存储 (免权限写入，路径好找)
-        // /storage/emulated/0/Android/data/com.copymanga.app/files/${config.crashLogDirName}
         appContext?.getExternalFilesDir("${config.crashLogDirName}")?.let {
             targetDirs.add(it)
         }
 
-        // 候选目录 2: 应用内部私有存储
-        // /data/data/com.copymanga.app/files/${config.crashLogDirName}
         appContext?.filesDir?.let {
             targetDirs.add(File(it, "${config.crashLogDirName}"))
         }
 
-        // 候选目录 3: 标准外部公共 Downloads 或 Documents (若有权限)
         val externalStorage = Environment.getExternalStorageDirectory()
         if (externalStorage != null && externalStorage.canWrite()) {
             targetDirs.add(File(externalStorage, "Download/CopyMangaCrash"))
@@ -551,7 +589,6 @@ import de.robv.android.xposed.XposedBridge
 
 /**
  * 统一日志输出器
- * 同步分发至 Android 标准 Logcat 以及 LSPosed 核心管理后台
  */
 object XpLog {
 
@@ -591,7 +628,6 @@ object XpLog {
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.copymanga.xposed">
 
-    <!-- 允许保存崩溃日志至外部存储 (Android 10及以下，Android 11+应用私有目录无需权限) -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
 
@@ -601,7 +637,6 @@ object XpLog {
         android:label="拷贝漫画去广告模块"
         android:supportsRtl="true">
 
-        <!-- LSPosed / Xposed API 102 核心模块声明 -->
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
@@ -658,9 +693,7 @@ android {
 }
 
 dependencies {
-    // Xposed API 102 (编译时引入，运行时由 LSPosed/EdXposed 宿主框架动态注入)
     compileOnly("de.robv.android.xposed:api:82")
-    // 注：若使用现代 YukiHookAPI 或现代 API 102 可选用 compileOnly
 }
 `;
 
@@ -672,6 +705,64 @@ dependencies {
 </resources>
 `;
 
+  const githubWorkflowYml = `name: Build CopyManga Xposed APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Package APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Grant Execute Permission for Gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug & Release APK
+        run: ./gradlew assembleDebug assembleRelease --stacktrace
+
+      - name: Sign APK (Using Standard Android Debug Keystore)
+        run: |
+          # 自动使用系统内置 debug.keystore 为 release APK 签名，便于 LSPosed 直接安装
+          mkdir -p ~/.android
+          keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" || true
+          
+          # 找到构建出的 APK
+          BUILD_TOOLS=\$(ls -d /usr/local/lib/android/sdk/build-tools/* | sort -V | tail -n 1)
+          echo "Using Android Build Tools: \$BUILD_TOOLS"
+          
+          if [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+            \$BUILD_TOOLS/zipalign -v -p 4 app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/app-release-aligned.apk
+            \$BUILD_TOOLS/apksigner sign --ks ~/.android/debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android --out app/build/outputs/apk/release/CopyManga-Xposed-v3.0.9-release.apk app/build/outputs/apk/release/app-release-aligned.apk
+          fi
+
+      - name: Upload Compiled APK to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CopyManga-Xposed-v3.0.9-APK
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+`;
+
   return [
     {
       id: 'MainHook',
@@ -679,7 +770,7 @@ dependencies {
       path: 'app/src/main/java/com/copymanga/xposed/MainHook.kt',
       language: 'kotlin',
       category: 'core',
-      description: '模块主入口 (IXposedHookLoadPackage)，负责包名过滤、早期崩溃接管与 360 加固挂钩分发',
+      description: '主入口：包含 com.stub.StubApp 代理类检测、加固壳状态守候与分阶段挂钩',
       content: mainHookCode,
     },
     {
@@ -688,7 +779,7 @@ dependencies {
       path: 'app/src/main/java/com/copymanga/xposed/hooks/JiaguUnpackerHook.kt',
       language: 'kotlin',
       category: 'hook',
-      description: '穿透 360 加固 (libjiagu.so) 核心：Hook Application.attach 捕获解密后的真实 ClassLoader',
+      description: '360加固穿透器：Hook StubApp及Application.attachBaseContext，空指针防御与动态ClassLoader获取',
       content: jiaguHookCode,
     },
     {
@@ -717,6 +808,15 @@ dependencies {
       category: 'core',
       description: '统一双通道日志桥梁：同步写入 Android Logcat 与 LSPosed 系统日志中心',
       content: xpLogCode,
+    },
+    {
+      id: 'github_workflow',
+      name: 'build-apk.yml',
+      path: '.github/workflows/build-apk.yml',
+      language: 'yaml',
+      category: 'build',
+      description: 'GitHub Actions 自动构建流水线：推送到 GitHub 即可在线全自动编译生成已签名的 APK',
+      content: githubWorkflowYml,
     },
     {
       id: 'xposed_init',

@@ -55,24 +55,73 @@ kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 `;
   zip.file('gradle/libs.versions.toml', versionsToml);
 
-  // README.md with instructions
+  // gradle/wrapper/gradle-wrapper.properties
+  const wrapperProps = `distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\\://services.gradle.org/distributions/gradle-8.6-bin.zip
+networkTimeout=10000
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+`;
+  zip.file('gradle/wrapper/gradle-wrapper.properties', wrapperProps);
+
+  // gradlew (unix bash script)
+  const gradlewBash = `#!/bin/sh
+# Gradle start up script for POSIX systems
+exec gradle "$@"
+`;
+  zip.file('gradlew', gradlewBash, { unixPermissions: '755' });
+
+  // gradlew.bat
+  const gradlewBat = `@rem Gradle start up script for Windows
+@gradle %*
+`;
+  zip.file('gradlew.bat', gradlewBat);
+
+  // .gitignore
+  const gitignore = `.gradle/
+build/
+app/build/
+*.iml
+.idea/
+local.properties
+.DS_Store
+`;
+  zip.file('.gitignore', gitignore);
+
+  // README.md with GitHub Actions build guide
   const readmeContent = `# 拷贝漫画 (com.copymanga.app) Xposed / LSPosed 去广告模块
 
 ## 项目说明
 - 适配目标：拷贝漫画 v${config.appVersion}
 - 包名：${config.packageName}
 - 核心技术：
-  1. 360 加固 (libjiagu.so) 动态 ClassLoader 劫持与解密穿透
-  2. Pangle 穿山甲 (libPglbizsdk_ml.so) 与 Heytap OPPO 广告拦截
+  1. 360 加固 (\`com.stub.StubApp\` / \`libjiagu.so\`) 动态代理检测与 ClassLoader 异步获取
+  2. Pangle 穿山甲 (\`libPglbizsdk_ml.so\`) 与 Heytap OPPO 广告拦截
   3. Flutter MethodChannel 广告事件秒通与空白占位消除
   4. 绝不误伤漫画阅读图片及网络接口
   5. CrashCatcher 全局未捕获异常持久化抓取
 
-## 编译方法
+## 方式 A: GitHub Actions 线上自动构建 APK (无需本地安装 Android Studio)
+1. 在 GitHub 上新建一个仓库（例如：\`copymanga-xposed-adblock\`）。
+2. 将本工程全部文件解压后推送到你的 GitHub 仓库主分支：
+   \`\`\`bash
+   git init
+   git add .
+   git commit -m "feat: init copymanga xposed module with 360 stub guard"
+   git branch -M main
+   git remote add origin https://github.com/你的用户名/copymanga-xposed-adblock.git
+   git push -u origin main
+   \`\`\`
+3. 推送完成后，点击 GitHub 仓库顶部的 **Actions** 标签页。
+4. 工作流 **Build CopyManga Xposed APK** 会自动运行（耗时约 1~2 分钟）。
+5. 构建完成后，在页面下方的 **Artifacts** 区域即可一键下载已编译签名的 \`CopyManga-Xposed-v3.0.9-APK.zip\`！
+
+## 方式 B: 本地 Android Studio 编译
 1. 使用 Android Studio 打开本项目根目录。
-2. 等待 Gradle 同步完成（会自动检索 Xposed API 依赖）。
-3. 菜单选择 Build -> Build Bundle(s) / APK(s) -> Build APK(s)。
-4. 安装到已配备 LSPosed 的设备，在作用域中勾选“拷贝漫画”并强行停止后重启应用生效。
+2. 菜单选择 Build -> Build Bundle(s) / APK(s) -> Build APK(s)。
+3. 安装到已配备 LSPosed 的设备，在作用域中勾选“拷贝漫画”并强行停止后重启应用生效。
 
 ## 闪退日志查看路径
 - 外部存储：/sdcard/Android/data/${config.packageName}/files/${config.crashLogDirName}/crash_*.log
