@@ -1,0 +1,6 @@
+{
+  "name": "CopyManga Xposed (LSPosed) AdBlock DevStudio",
+  "description": "针对拷贝漫画 3.0.9 (360加固 + Flutter) 的 Xposed/LSPosed API 102 去广告模块源码工作台与崩溃抓取工具",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
